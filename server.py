@@ -74,26 +74,48 @@ async def cbd_country_profile(country: str) -> str:
 
     async with httpx.AsyncClient(headers=HEADERS, timeout=20) as client:
 
-        # 1. National Records (NR) — ABS legislation declared by the country
+        # 1. MSR — Legislative/administrative/policy measures on ABS (correct schema)
+        # Schema identifier is "measure" per ABSCH API docs (MSR = Measures on ABS)
+        # Record format: ABSCH-MSR-{COUNTRY_CODE}-{ID}
         try:
             r = await client.get(
                 f"{ABSCH_BASE}/documents",
-                params={"schema": "NR", "country": code, "per-page": 10}
+                params={"schema": "measure", "government": code.lower(), "per-page": 10}
             )
             if r.status_code == 200:
                 data = r.json()
                 records = data.get("data", data) if isinstance(data, dict) else data
                 results["national_records"] = [
                     {
-                        "title": rec.get("title", {}).get("en", "N/A"),
+                        "title": rec.get("title", {}).get("en", rec.get("title", {}).get("fr", "N/A")) if isinstance(rec.get("title"), dict) else str(rec.get("title", "N/A"))[:100],
                         "uid": rec.get("identifier", ""),
+                        "status": rec.get("legalStatus", {}).get("name", "?") if isinstance(rec.get("legalStatus"), dict) else "?",
                         "updated": rec.get("updatedOn", "")[:10] if rec.get("updatedOn") else "",
-                        "url": f"https://absch.cbd.int/en/database/national-records/NR/{rec.get('identifier','')}"
+                        "url": f"https://absch.cbd.int/en/database/record/{rec.get('identifier','')}"
                     }
-                    for rec in (records[:5] if isinstance(records, list) else [])
+                    for rec in (records[:10] if isinstance(records, list) else [])
                 ]
+                results["national_records_total"] = data.get("totalCount", len(results["national_records"])) if isinstance(data, dict) else len(results["national_records"])
             else:
-                results["national_records_error"] = f"HTTP {r.status_code}"
+                # Fallback: try with uppercase country code
+                r2 = await client.get(
+                    f"{ABSCH_BASE}/documents",
+                    params={"schema": "measure", "government": code, "per-page": 10}
+                )
+                if r2.status_code == 200:
+                    data = r2.json()
+                    records = data.get("data", data) if isinstance(data, dict) else data
+                    results["national_records"] = [
+                        {
+                            "title": rec.get("title", {}).get("en", "N/A") if isinstance(rec.get("title"), dict) else str(rec.get("title", "N/A"))[:100],
+                            "uid": rec.get("identifier", ""),
+                            "updated": rec.get("updatedOn", "")[:10] if rec.get("updatedOn") else "",
+                            "url": f"https://absch.cbd.int/en/database/record/{rec.get('identifier','')}"
+                        }
+                        for rec in (records[:10] if isinstance(records, list) else [])
+                    ]
+                else:
+                    results["national_records_error"] = f"HTTP {r.status_code} / {r2.status_code}"
         except Exception as e:
             results["national_records_error"] = str(e)
 
@@ -132,16 +154,23 @@ async def cbd_country_profile(country: str) -> str:
         except Exception as e:
             results["cna_error"] = str(e)
 
+    nr_count = results.get("national_records_total", len(results.get("national_records", [])))
     output = [
         f"## ABSCH Country Profile: {country.upper()} (ISO code: {code})",
-        f"Source: https://absch.cbd.int/countries/{code}",
+        f"Source: https://absch.cbd.int/en/countries/{code}",
         "",
-        f"### National ABS Records ({len(results.get('national_records', []))} found)"
+        f"### National ABS Measures — MSR ({nr_count} officially published in ABSCH)"
     ]
     for nr in results.get("national_records", []):
-        output.append(f"- **{nr['title']}** (updated: {nr['updated']}) — {nr['url']}")
+        status = f" [{nr.get('status','?')}]" if nr.get('status') and nr.get('status') != '?' else ""
+        output.append(f"- **{nr['title']}**{status} (updated: {nr['updated']}) — {nr['url']}")
     if not results.get("national_records"):
-        output.append("- No national records found or query error")
+        if results.get("national_records_error"):
+            output.append(f"- Query error: {results['national_records_error']}")
+        else:
+            output.append("- No MSR records officially published in ABSCH")
+            output.append("  ⚠️ Note: absence of ABSCH records ≠ absence of national legislation (transparency deficit)")
+        output.append(f"  → Check directly: https://absch.cbd.int/en/database/abs-measures?government={code.lower()}")
 
     output += [
         "",
@@ -158,8 +187,8 @@ async def cbd_country_profile(country: str) -> str:
     output += [
         "",
         f"### Direct links",
-        f"- Country profile: https://absch.cbd.int/countries/{code}",
-        f"- National legislation: https://absch.cbd.int/en/database/national-records/NR?country={code}",
+        f"- Country profile: https://absch.cbd.int/en/countries/{code}",
+        f"- National ABS measures: https://absch.cbd.int/en/database/abs-measures?government={code.lower()}",
         f"- IRCCs issued: https://absch.cbd.int/en/database/irccs?providerCountry={code}",
     ]
 
